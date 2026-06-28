@@ -1,0 +1,162 @@
+name: Build AAaTempSpoof
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-native:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip make zip file
+
+      - name: Download Android NDK r29
+        run: |
+          mkdir -p $HOME/android-ndk
+          cd $HOME/android-ndk
+          wget -q https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+          unzip -q android-ndk-r29-linux.zip
+
+      - name: Set NDK environment
+        run: |
+          echo "NDK=$HOME/android-ndk/android-ndk-r29" >> $GITHUB_ENV
+          echo "$HOME/android-ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Build Android arm64-v8a binaries
+        run: |
+          mkdir -p build/bin
+
+          export TARGET=aarch64-linux-android
+          export API=21
+          export CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}${API}-clang
+          export CXX=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}${API}-clang++
+
+          $CC bin/AaTempSpoof/main.c \
+            -I bin/AaTempSpoof \
+            -O2 -fPIE -pie -Wall \
+            -o build/bin/AaTempSpoof
+
+          $CC bin/cb.c -O2 -fPIE -pie -Wall -o build/bin/cb
+          $CC bin/charge_horae_daemon.c -O2 -fPIE -pie -Wall -o build/bin/charge_horae_daemon
+          $CC bin/color_tombstone.c -O2 -fPIE -pie -Wall -o build/bin/color_tombstone
+          $CC bin/touch_daemon.c -O2 -fPIE -pie -Wall -o build/bin/touch_daemon
+
+          $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
+            build/bin/AaTempSpoof \
+            build/bin/cb \
+            build/bin/charge_horae_daemon \
+            build/bin/color_tombstone \
+            build/bin/touch_daemon
+
+      - name: Verify binary architecture
+        run: |
+          file build/bin/AaTempSpoof
+          file build/bin/cb
+          file build/bin/charge_horae_daemon
+          file build/bin/color_tombstone
+          file build/bin/touch_daemon
+
+      - name: Upload native binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-binaries
+          path: build/bin/
+
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          
+      - name: Install Gradle 8.2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip
+          wget https://services.gradle.org/distributions/gradle-8.2-bin.zip
+          unzip gradle-8.2-bin.zip -d $HOME/gradle
+          echo "$HOME/gradle/gradle-8.2/bin" >> $GITHUB_PATH
+
+      - name: Show Gradle version
+        run: gradle -v
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make gradlew executable if exists
+        run: |
+          if [ -f "apk/AAaTempSpoofTile/gradlew" ]; then
+            chmod +x apk/AAaTempSpoofTile/gradlew
+          fi
+
+      - name: Show Gradle version
+        run: gradle -v
+        
+      - name: Build APK
+        working-directory: apk/AAaTempSpoofTile
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug
+          else
+            gradle assembleDebug
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aa-temp-spoof-apk
+          path: apk/AAaTempSpoofTile/app/build/outputs/apk/debug/app-debug.apk
+
+  package-release:
+    runs-on: ubuntu-latest
+    needs: [build-native, build-apk]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download native binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: native-binaries
+          path: build/bin
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: aa-temp-spoof-apk
+          path: build/apk
+
+      - name: Prepare release folder
+        run: |
+          rm -rf build/release
+          mkdir -p build/release/AAaTempSpoof/bin
+          mkdir -p build/release/AAaTempSpoof/apk
+
+          cp module.prop customize.sh service.sh post-fs-data.sh action.sh uninstall.sh build/release/AAaTempSpoof/
+          cp -r AaTempSpoof webroot build/release/AAaTempSpoof/
+          cp build/bin/* build/release/AAaTempSpoof/bin/
+
+          if [ -f build/apk/app-debug.apk ]; then
+            cp build/apk/app-debug.apk build/release/AAaTempSpoof/apk/AaTempSpoof.apk
+          fi
+
+      - name: Create zip package
+        run: |
+          cd build/release/AAaTempSpoof
+          zip -r ../../AAaTempSpoof.zip .
+
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: AAaTempSpoof-release
+          path: build/AAaTempSpoof.zip
